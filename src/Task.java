@@ -1,13 +1,15 @@
 import java.util.List;
-import java.util.Random;
 
 public class Task {
+
     String id;
     List<String> dependencies;
     int maxRetries;
 
     int attempts = 0;
     Status status = Status.PENDING;
+
+    long timeoutMs = 2000; // ⏱️ timeout support
 
     enum Status {
         PENDING, RUNNING, SUCCESS, FAILED
@@ -20,14 +22,12 @@ public class Task {
     }
 
     public void execute() throws Exception {
-        System.out.println("[START] " + id);
+        System.out.println("[EXEC] " + id);
 
-        // simulate random failure
-        if (new Random().nextInt(10) < 2) {
-            throw new Exception("Random failure");
-        }
-
+        // Simulate work
         Thread.sleep(200);
-        System.out.println("[END] " + id);
+
+        // Optional: simulate failure
+        // if (id.equals("B")) throw new Exception("Failing B");
     }
 }
