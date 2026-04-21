@@ -17,7 +17,7 @@ public class PipelineExecutor {
 
     private FailurePolicy failurePolicy;
 
-    private int retryBudget = 10; // global retry cap
+    private int retryBudget = 20;
 
     public PipelineExecutor(List<Task> tasks,
                             int workers,
@@ -36,8 +36,8 @@ public class PipelineExecutor {
                 workers,
                 0L,
                 TimeUnit.MILLISECONDS,
-                new ArrayBlockingQueue<>(50), // backpressure
-                new ThreadPoolExecutor.AbortPolicy() // rejection
+                new ArrayBlockingQueue<>(50),
+                new ThreadPoolExecutor.AbortPolicy()
         );
 
         buildGraph(tasks);
@@ -68,32 +68,41 @@ public class PipelineExecutor {
         while (!queue.isEmpty()) {
 
             int size = queue.size();
+            List<String> currentWave = new ArrayList<>();
             List<CompletableFuture<Void>> futures = new ArrayList<>();
 
             for (int i = 0; i < size; i++) {
-                String id = queue.poll();
-                Task task = taskMap.get(id);
+                String stageId = queue.poll();
+                currentWave.add(stageId);
 
-                futures.add(CompletableFuture.runAsync(() -> executeStage(task), workerPool)
-                        .orTimeout(task.timeoutMs, TimeUnit.MILLISECONDS)
-                        .exceptionally(ex -> {
-                            markFailed(task.id);
-                            return null;
-                        }));
+                Task task = taskMap.get(stageId);
+
+                futures.add(
+                    CompletableFuture.runAsync(() -> executeStage(task), workerPool)
+                    .orTimeout(task.timeoutMs, TimeUnit.MILLISECONDS)
+                    .exceptionally(ex -> {
+                        markFailed(stageId);
+                        return null;
+                    })
+                );
             }
 
             CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
 
-            for (String completed : new ArrayList<>(resultStore.keySet())) {
+            for (String stageId : currentWave) {
 
-                StageResult res = resultStore.get(completed);
+                StageResult res = resultStore.get(buildKey(stageId));
+                if (res == null) continue;
 
                 if (res.status.equals("FAILED")) {
                     if (failurePolicy == FailurePolicy.FAIL_FAST) return;
-                    markDownstreamSkipped(completed);
+                    markDownstreamSkipped(stageId);
                 }
 
-                for (String neighbor : adjList.get(completed)) {
+                List<String> neighbors = adjList.get(stageId);
+                if (neighbors == null) continue;
+
+                for (String neighbor : neighbors) {
                     inDegree.put(neighbor, inDegree.get(neighbor) - 1);
 
                     if (inDegree.get(neighbor) == 0 &&
@@ -105,17 +114,15 @@ public class PipelineExecutor {
         }
 
         workerPool.shutdown();
+        System.out.println("Pipeline completed.");
     }
 
     private void executeStage(Task task) {
 
         String key = buildKey(task.id);
-
-        // idempotency
         if (resultStore.containsKey(key)) return;
 
         long start = System.currentTimeMillis();
-
         String status = "FAILED";
 
         while (task.attempts <= task.maxRetries && retryBudget > 0) {
@@ -124,18 +131,12 @@ public class PipelineExecutor {
                 retryBudget--;
 
                 task.execute();
-
                 status = "SUCCESS";
                 break;
 
             } catch (Exception e) {
+                if (task.attempts > task.maxRetries) break;
 
-                if (task.attempts > task.maxRetries) {
-                    status = "FAILED";
-                    break;
-                }
-
-                // exponential backoff + jitter
                 try {
                     long backoff = (long) (Math.pow(2, task.attempts) * 100 + Math.random() * 50);
                     Thread.sleep(backoff);
@@ -145,18 +146,15 @@ public class PipelineExecutor {
 
         long duration = System.currentTimeMillis() - start;
 
-        StageResult result = new StageResult(key, task.id, pipelineId, status, duration);
-
-        // crash-safe pattern (simulate write-before-ack)
-        resultStore.putIfAbsent(key, result);
+        resultStore.putIfAbsent(key,
+                new StageResult(key, task.id, pipelineId, status, duration));
 
         log(task.id, status, duration);
     }
 
-    private void markFailed(String taskId) {
-        String key = buildKey(taskId);
-        resultStore.putIfAbsent(key,
-                new StageResult(key, taskId, pipelineId, "FAILED", 0));
+    private void markFailed(String stageId) {
+        resultStore.putIfAbsent(buildKey(stageId),
+                new StageResult(buildKey(stageId), stageId, pipelineId, "FAILED", 0));
     }
 
     private void markDownstreamSkipped(String failed) {
