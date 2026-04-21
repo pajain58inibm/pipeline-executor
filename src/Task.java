@@ -9,7 +9,7 @@ public class Task {
     int attempts = 0;
     Status status = Status.PENDING;
 
-    long timeoutMs = 2000; // ⏱️ timeout support
+    long timeoutMs = 2000;
 
     enum Status {
         PENDING, RUNNING, SUCCESS, FAILED
@@ -23,11 +23,6 @@ public class Task {
 
     public void execute() throws Exception {
         System.out.println("[EXEC] " + id);
-
-        // Simulate work
         Thread.sleep(200);
-
-        // Optional: simulate failure
-        // if (id.equals("B")) throw new Exception("Failing B");
     }
 }
