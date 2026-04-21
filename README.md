@@ -1,149 +1,256 @@
 # 🚀 Pipeline Executor (DAG-based Workflow Engine)
 
-A lightweight **workflow execution engine** that models tasks as a **Directed Acyclic Graph (DAG)** and executes them with:
+A lightweight **workflow execution engine** that models tasks as a **Directed Acyclic Graph (DAG)** and executes them with production-grade concerns:
 
-* ⚡ Parallel wave scheduling
-* 🔁 Retry + idempotency guarantees
-* ❌ Failure propagation (SKIPPED downstream tasks)
-* 🧵 Worker pool (bounded concurrency)
-* 📊 Structured logging for observability
+* ⚡ Parallel wave scheduling (`CompletableFuture`)
+* 🧵 Bounded worker pool with backpressure
+* 🔁 Idempotent retries with strong key design
+* ❌ Failure propagation (SKIPPED downstream)
+* ⏱️ Per-stage timeouts
+* 🧭 Configurable failure policies (FAIL_FAST / CONTINUE)
+* 📊 Structured logging with trace IDs
+* 📉 Retry budgets, exponential backoff + jitter
+* 🚦 Queue limits and rejection policy
 
 ---
 
 # 🧠 Problem Statement
 
-Design a system where:
+Design a pipeline system where:
 
-* Tasks have dependencies
-* A task runs only after its dependencies complete
-* System should handle retries, failures, and parallel execution
+* Tasks have dependencies (DAG)
+* Tasks run only after dependencies complete
+* System handles retries, failures, timeouts, and parallel execution
 
 ---
 
 # 🏗️ Architecture Overview
 
-### DAG Representation
+## DAG Representation
 
-* Each task = node
-* Dependencies = directed edges
-* Uses:
+* Nodes → `Task`
+* Edges → dependencies
+* Data structures:
 
   * `adjList` → dependency graph
-  * `inDegree` → pending dependencies
+  * `inDegree` → unresolved dependencies
 
-### Execution Model
+## Execution Model
 
-* Uses **Kahn’s Algorithm (Topological Sort)**
+* Based on **Kahn’s Algorithm (Topological Sort)**
 * Executes tasks in **waves**:
 
-  * All tasks with `inDegree = 0` run in parallel
-  * Next wave triggered after completion
+  * All `inDegree = 0` tasks run in parallel
+  * Next wave starts after completion
 
 ---
 
-# ⚡ Features
+# ⚙️ Advanced Execution Features
 
 ## 1. Parallel Wave Scheduling
 
-* Implemented using `CompletableFuture`
-* Uses:
+* Uses `CompletableFuture.runAsync()`
+* Synchronization via:
 
   ```java
   CompletableFuture.allOf(...).join();
   ```
-* Enables **fan-out execution** of independent tasks
+* Enables **fan-out / fan-in execution**
 
 ---
 
-## 2. Worker Pool (Bounded Concurrency)
+## 2. Worker Pool & Backpressure
 
-* Uses:
+### Implementation
 
-  ```java
-  Executors.newFixedThreadPool(N)
-  ```
-* Prevents resource exhaustion
-* Models real-world worker systems
-
----
-
-## 3. Idempotency
-
-* Ensures tasks are executed **exactly once**
-* Implemented using:
-
-  ```java
-  ConcurrentHashMap.putIfAbsent()
-  ```
-* Prevents duplicate execution during retries
-
----
-
-## 4. Retry Mechanism
-
-* Each task has `maxRetries`
-* Simple backoff using `Thread.sleep`
-* Handles transient failures gracefully
-
----
-
-## 5. Failure Propagation
-
-* If a task fails:
-
-  * All downstream tasks are marked **SKIPPED**
-* Avoids wasted computation
-* Models real CI/CD behavior
-
----
-
-## 6. Observability (Structured Logging)
-
-Each stage emits logs like:
-
-```text
-pipeline_id=pipeline-normal stage_id=B status=SUCCESS duration_ms=512
+```java
+new ThreadPoolExecutor(
+  N, N,
+  0L,
+  TimeUnit.MILLISECONDS,
+  new ArrayBlockingQueue<>(50),
+  new ThreadPoolExecutor.AbortPolicy()
+)
 ```
 
-Fields:
+### Behavior
 
+* Bounded queue prevents overload
+* If queue fills → **task rejected**
+* Models real-world **backpressure**
+
+---
+
+## 3. Failure Policy
+
+### Options
+
+* `FAIL_FAST` → stop pipeline immediately on failure
+* `CONTINUE` → continue independent branches
+
+### Tradeoff
+
+* FAIL_FAST → saves compute
+* CONTINUE → maximizes partial success
+
+---
+
+## 4. Transitive Failure Propagation
+
+If a stage fails:
+
+* All downstream stages are marked **SKIPPED**
+* No unnecessary execution
+
+---
+
+## 5. Timeout Handling
+
+Each task has:
+
+```java
+long timeoutMs;
+```
+
+Enforced via:
+
+```java
+future.orTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+```
+
+If exceeded:
+
+* Stage marked **FAILED**
+* Failure policy applied
+
+---
+
+# 🔁 Idempotency Design
+
+## Key Structure
+
+```
+pipelineId : runId : stageId : commitSha
+```
+
+### Why this works
+
+* Uniquely identifies execution context
+* Prevents duplicate execution across retries
+
+---
+
+## Implementation
+
+```java
+ConcurrentHashMap.putIfAbsent(key, result)
+```
+
+---
+
+## Crash-after-success Problem
+
+> What if process crashes after execution but before storing result?
+
+### Mitigation (Design)
+
+* External store (DB/Redis)
+* Write-before-acknowledge pattern
+
+---
+
+# 🔁 Retry Strategy
+
+## Features
+
+* Per-task retry limit
+* Global retry budget
+* Exponential backoff + jitter
+
+### Example
+
+```java
+backoff = 2^attempt * base + random_jitter
+```
+
+---
+
+# 📊 Observability
+
+## Structured Logging
+
+Example:
+
+```text
+trace_id=run123 pipeline_id=pipeline1 stage_id=B status=SUCCESS duration_ms=512
+```
+
+## Fields
+
+* `trace_id` → correlates entire run
 * `pipeline_id`
 * `stage_id`
-* `status` (SUCCESS / FAILED / SKIPPED)
+* `status`
 * `duration_ms`
 
 ---
 
-## 7. Cycle Detection
+## Metrics (Design)
 
-* If tasks remain unprocessed → cycle exists
-* Prevents invalid DAG execution
+Can be added via:
+
+* Counters:
+
+  * total_tasks
+  * success_count
+  * failure_count
+* Histograms:
+
+  * execution_latency
+
+### Alerts (what to monitor)
+
+* High failure rate
+* Retry spikes
+* Long-running stages
+* Queue saturation
+
+---
+
+## MDC (Mapped Diagnostic Context)
+
+In production:
+
+* Use SLF4J MDC to auto-attach:
+
+  * trace_id
+  * pipeline_id
 
 ---
 
 # 🧪 Test Scenarios
 
-## ✅ Normal DAG (Parallel Execution)
+## ✅ Normal DAG
 
 ```
 A → B → D
 A → C → D
 ```
 
-* B and C run in parallel after A
+* B & C run in parallel
 
 ---
 
 ## 🔁 Retry Scenario
 
-* Task fails first attempt → succeeds on retry
+* Task fails once → succeeds on retry
 
 ---
 
 ## ❌ Failure Scenario
 
 * Task fails permanently
-* Downstream tasks are SKIPPED
+* Downstream tasks SKIPPED
 
 ---
 
@@ -153,7 +260,7 @@ A → C → D
 A → B → C → A
 ```
 
-* Execution halts due to cycle
+* Execution halts
 
 ---
 
@@ -173,28 +280,30 @@ src/
  ├── Task.java
  ├── PipelineExecutor.java
  ├── StageResult.java
+ ├── FailurePolicy.java
  └── Main.java
 ```
 
 ---
 
-# 🧠 Key Concepts Demonstrated
+# 🔮 Future Improvements
 
-* DAG execution & Topological Sort
-* Concurrent programming with thread pools
-* Idempotent system design
-* Retry & failure handling strategies
-* Observability & structured logging
+* Distributed queue (Kafka / RabbitMQ)
+* Persistent execution state (Redis / DB)
+* Priority scheduling (`PriorityBlockingQueue`)
+* REST API trigger
+* DAG visualization UI
 
 ---
 
-# 🔥 Future Improvements
+# 🔁 Migration to Distributed System (Interview Talking Point)
 
-* Distributed queue (Kafka / RabbitMQ)
-* Persistent state (Redis / DB)
-* REST API to trigger pipelines
-* DAG visualization UI
-* Priority scheduling
+To scale:
+
+1. Replace in-memory queue → Kafka topic
+2. Workers → distributed consumers
+3. Idempotency store → Redis
+4. State → persistent DB
 
 ---
 
@@ -202,12 +311,12 @@ src/
 
 You can confidently say:
 
-> “This system models a DAG-based pipeline executor with parallel scheduling, idempotent retries, and failure propagation, similar to workflow engines like Airflow or CI/CD systems.”
+> “This system supports DAG-based parallel execution with bounded concurrency, idempotent retries, failure propagation, timeout handling, and structured observability, similar to workflow engines like Airflow or CI/CD systems.”
 
 ---
 
 # 📌 Summary
 
-This project demonstrates how to design and implement a **scalable, fault-tolerant workflow execution system** with real-world engineering tradeoffs.
+This project demonstrates how to design a **fault-tolerant, scalable workflow engine** with real-world production considerations and tradeoffs.
 
 ---
