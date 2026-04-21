@@ -8,27 +8,52 @@ public class PipelineExecutor {
     private Map<String, Integer> inDegree = new HashMap<>();
 
     private Map<String, StageResult> resultStore = new ConcurrentHashMap<>();
+
     private ExecutorService workerPool;
 
     private String pipelineId;
+    private String runId;
+    private String commitSha;
 
-    public PipelineExecutor(List<Task> tasks, int workers, String pipelineId) {
+    private FailurePolicy failurePolicy;
+
+    private int retryBudget = 10; // global retry cap
+
+    public PipelineExecutor(List<Task> tasks,
+                            int workers,
+                            String pipelineId,
+                            String runId,
+                            String commitSha,
+                            FailurePolicy failurePolicy) {
+
         this.pipelineId = pipelineId;
-        this.workerPool = Executors.newFixedThreadPool(workers);
+        this.runId = runId;
+        this.commitSha = commitSha;
+        this.failurePolicy = failurePolicy;
+
+        this.workerPool = new ThreadPoolExecutor(
+                workers,
+                workers,
+                0L,
+                TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(50), // backpressure
+                new ThreadPoolExecutor.AbortPolicy() // rejection
+        );
+
         buildGraph(tasks);
     }
 
     private void buildGraph(List<Task> tasks) {
-        for (Task task : tasks) {
-            taskMap.put(task.id, task);
-            inDegree.put(task.id, 0);
-            adjList.put(task.id, new ArrayList<>());
+        for (Task t : tasks) {
+            taskMap.put(t.id, t);
+            inDegree.put(t.id, 0);
+            adjList.put(t.id, new ArrayList<>());
         }
 
-        for (Task task : tasks) {
-            for (String dep : task.dependencies) {
-                adjList.get(dep).add(task.id);
-                inDegree.put(task.id, inDegree.get(task.id) + 1);
+        for (Task t : tasks) {
+            for (String dep : t.dependencies) {
+                adjList.get(dep).add(t.id);
+                inDegree.put(t.id, inDegree.get(t.id) + 1);
             }
         }
     }
@@ -42,41 +67,37 @@ public class PipelineExecutor {
 
         while (!queue.isEmpty()) {
 
-            int waveSize = queue.size();
+            int size = queue.size();
             List<CompletableFuture<Void>> futures = new ArrayList<>();
 
-            // 🚀 Execute current wave in parallel
-            for (int i = 0; i < waveSize; i++) {
-                String taskId = queue.poll();
-                Task task = taskMap.get(taskId);
+            for (int i = 0; i < size; i++) {
+                String id = queue.poll();
+                Task task = taskMap.get(id);
 
-                futures.add(CompletableFuture.runAsync(() -> executeStage(task), workerPool));
+                futures.add(CompletableFuture.runAsync(() -> executeStage(task), workerPool)
+                        .orTimeout(task.timeoutMs, TimeUnit.MILLISECONDS)
+                        .exceptionally(ex -> {
+                            markFailed(task.id);
+                            return null;
+                        }));
             }
 
-            // ⏳ Wait for wave to complete
             CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
 
-            // 🔄 Process results and prepare next wave
-            for (CompletableFuture<Void> f : futures) {
-                // nothing needed here, results already stored
-            }
-
-            // Now update next wave
             for (String completed : new ArrayList<>(resultStore.keySet())) {
 
-                StageResult result = resultStore.get(completed);
+                StageResult res = resultStore.get(completed);
 
-                // ❌ If failed → mark downstream as skipped
-                if (result.status.equals("FAILED")) {
+                if (res.status.equals("FAILED")) {
+                    if (failurePolicy == FailurePolicy.FAIL_FAST) return;
                     markDownstreamSkipped(completed);
                 }
 
-                // Reduce in-degree
                 for (String neighbor : adjList.get(completed)) {
                     inDegree.put(neighbor, inDegree.get(neighbor) - 1);
 
                     if (inDegree.get(neighbor) == 0 &&
-                        !resultStore.containsKey(neighbor)) {
+                            !resultStore.containsKey(buildKey(neighbor))) {
                         queue.add(neighbor);
                     }
                 }
@@ -84,84 +105,88 @@ public class PipelineExecutor {
         }
 
         workerPool.shutdown();
-        System.out.println("Pipeline finished.");
     }
 
-    // 🚀 Execute a single stage with idempotency + retry
     private void executeStage(Task task) {
 
-        // 🔁 Idempotency check
-        if (resultStore.containsKey(task.id)) return;
+        String key = buildKey(task.id);
+
+        // idempotency
+        if (resultStore.containsKey(key)) return;
 
         long start = System.currentTimeMillis();
+
         String status = "FAILED";
 
-        try {
-            runWithRetry(task);
-            status = (task.status == Task.Status.SUCCESS) ? "SUCCESS" : "FAILED";
-        } catch (Exception e) {
-            status = "FAILED";
+        while (task.attempts <= task.maxRetries && retryBudget > 0) {
+            try {
+                task.attempts++;
+                retryBudget--;
+
+                task.execute();
+
+                status = "SUCCESS";
+                break;
+
+            } catch (Exception e) {
+
+                if (task.attempts > task.maxRetries) {
+                    status = "FAILED";
+                    break;
+                }
+
+                // exponential backoff + jitter
+                try {
+                    long backoff = (long) (Math.pow(2, task.attempts) * 100 + Math.random() * 50);
+                    Thread.sleep(backoff);
+                } catch (InterruptedException ignored) {}
+            }
         }
 
         long duration = System.currentTimeMillis() - start;
 
-        // 🔁 Idempotency write
-        resultStore.putIfAbsent(task.id,
-                new StageResult(task.id, pipelineId, status, duration));
+        StageResult result = new StageResult(key, task.id, pipelineId, status, duration);
 
-        // 📊 Structured logging
+        // crash-safe pattern (simulate write-before-ack)
+        resultStore.putIfAbsent(key, result);
+
         log(task.id, status, duration);
     }
 
-    private void markDownstreamSkipped(String failedTask) {
+    private void markFailed(String taskId) {
+        String key = buildKey(taskId);
+        resultStore.putIfAbsent(key,
+                new StageResult(key, taskId, pipelineId, "FAILED", 0));
+    }
+
+    private void markDownstreamSkipped(String failed) {
         Queue<String> q = new LinkedList<>();
-        q.add(failedTask);
+        q.add(failed);
 
         while (!q.isEmpty()) {
             String curr = q.poll();
 
-            for (String neighbor : adjList.get(curr)) {
-                if (!resultStore.containsKey(neighbor)) {
+            for (String next : adjList.get(curr)) {
+                String key = buildKey(next);
 
-                    resultStore.put(neighbor,
-                            new StageResult(neighbor, pipelineId, "SKIPPED", 0));
-
-                    log(neighbor, "SKIPPED", 0);
-
-                    q.add(neighbor);
+                if (!resultStore.containsKey(key)) {
+                    resultStore.put(key,
+                            new StageResult(key, next, pipelineId, "SKIPPED", 0));
+                    log(next, "SKIPPED", 0);
+                    q.add(next);
                 }
             }
         }
     }
 
-    private void runWithRetry(Task task) {
-        while (task.attempts <= task.maxRetries) {
-            try {
-                task.status = Task.Status.RUNNING;
-                task.attempts++;
-
-                task.execute();
-
-                task.status = Task.Status.SUCCESS;
-                return;
-
-            } catch (Exception e) {
-                if (task.attempts > task.maxRetries) {
-                    task.status = Task.Status.FAILED;
-                    return;
-                }
-
-                try {
-                    Thread.sleep(200);
-                } catch (InterruptedException ignored) {}
-            }
-        }
+    private String buildKey(String stageId) {
+        return pipelineId + ":" + runId + ":" + stageId + ":" + commitSha;
     }
 
-    // 📊 Structured logging
     private void log(String stageId, String status, long duration) {
         System.out.println(
-                "pipeline_id=" + pipelineId +
+                "trace_id=" + runId +
+                " pipeline_id=" + pipelineId +
                 " stage_id=" + stageId +
                 " status=" + status +
                 " duration_ms=" + duration
