@@ -1,4 +1,5 @@
 import java.util.List;
+import java.util.UUID;
 
 public class Main {
 
@@ -10,10 +11,9 @@ public class Main {
 
         runTest("TEST 3: FAILURE WITH SKIP PROPAGATION", Main::testFailurePipeline);
 
-        runTest("TEST 4: CYCLE DETECTION (EDGE CASE)", Main::testCyclePipeline);
+        runTest("TEST 4: CYCLE DETECTION", Main::testCyclePipeline);
     }
 
-    // 🔧 Wrapper with timing
     private static void runTest(String testName, Runnable testMethod) {
         System.out.println("\n========== " + testName + " ==========");
 
@@ -26,7 +26,22 @@ public class Main {
         System.out.println("Execution time: " + (end - start) + " ms");
     }
 
-    // ✅ TEST 1: Normal DAG (parallel fan-out expected)
+    // Helper to generate run metadata
+    private static PipelineExecutor createExecutor(List<Task> tasks, int workers, String pipelineId) {
+        String runId = UUID.randomUUID().toString();
+        String commitSha = "commit-" + System.currentTimeMillis();
+
+        return new PipelineExecutor(
+                tasks,
+                workers,
+                pipelineId,
+                runId,
+                commitSha,
+                FailurePolicy.CONTINUE // change to FAIL_FAST to demo behavior
+        );
+    }
+
+    // ✅ TEST 1
     private static void testNormalPipeline() {
 
         Task A = new Task("A", List.of(), 2);
@@ -51,13 +66,12 @@ public class Main {
 
         List<Task> tasks = List.of(A, B, C, D);
 
-        PipelineExecutor executor =
-                new PipelineExecutor(tasks, 4, "pipeline-normal");
+        PipelineExecutor executor = createExecutor(tasks, 4, "pipeline-normal");
 
         executor.execute();
     }
 
-    // 🔁 TEST 2: Retry scenario
+    // 🔁 TEST 2
     private static void testRetryPipeline() {
 
         Task A = new Task("A", List.of(), 2);
@@ -80,13 +94,12 @@ public class Main {
 
         List<Task> tasks = List.of(A, B, C);
 
-        PipelineExecutor executor =
-                new PipelineExecutor(tasks, 3, "pipeline-retry");
+        PipelineExecutor executor = createExecutor(tasks, 3, "pipeline-retry");
 
         executor.execute();
     }
 
-    // ❌ TEST 3: Failure + downstream SKIPPED
+    // ❌ TEST 3
     private static void testFailurePipeline() {
 
         Task A = new Task("A", List.of(), 2);
@@ -100,18 +113,16 @@ public class Main {
         };
 
         Task C = new Task("C", List.of("B"), 2);
-
         Task D = new Task("D", List.of("C"), 2);
 
         List<Task> tasks = List.of(A, B, C, D);
 
-        PipelineExecutor executor =
-                new PipelineExecutor(tasks, 3, "pipeline-failure");
+        PipelineExecutor executor = createExecutor(tasks, 3, "pipeline-failure");
 
         executor.execute();
     }
 
-    // 🔄 TEST 4: Cycle detection edge case
+    // 🔄 TEST 4
     private static void testCyclePipeline() {
 
         Task A = new Task("A", List.of("C"), 2);
@@ -120,8 +131,7 @@ public class Main {
 
         List<Task> tasks = List.of(A, B, C);
 
-        PipelineExecutor executor =
-                new PipelineExecutor(tasks, 2, "pipeline-cycle");
+        PipelineExecutor executor = createExecutor(tasks, 2, "pipeline-cycle");
 
         executor.execute();
     }
