@@ -1,0 +1,25 @@
+name: Run Pipeline Executor
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Compile
+        run: javac src/*.java
+
+      - name: Run Pipeline
+        run: java -cp src Main
