@@ -4,13 +4,16 @@ public class Main {
 
     public static void main(String[] args) {
 
-        runTest("TEST 1: NORMAL DAG", Main::testNormalPipeline);
+        runTest("TEST 1: NORMAL DAG (PARALLEL)", Main::testNormalPipeline);
+
         runTest("TEST 2: RETRY SCENARIO", Main::testRetryPipeline);
-        runTest("TEST 3: FAILURE SCENARIO", Main::testFailurePipeline);
-        runTest("TEST 4: CYCLE DETECTION", Main::testCyclePipeline);
+
+        runTest("TEST 3: FAILURE WITH SKIP PROPAGATION", Main::testFailurePipeline);
+
+        runTest("TEST 4: CYCLE DETECTION (EDGE CASE)", Main::testCyclePipeline);
     }
 
-    // 🔧 Wrapper to measure execution time
+    // 🔧 Wrapper with timing
     private static void runTest(String testName, Runnable testMethod) {
         System.out.println("\n========== " + testName + " ==========");
 
@@ -23,20 +26,38 @@ public class Main {
         System.out.println("Execution time: " + (end - start) + " ms");
     }
 
-    // ✅ Test 1: Normal DAG
+    // ✅ TEST 1: Normal DAG (parallel fan-out expected)
     private static void testNormalPipeline() {
+
         Task A = new Task("A", List.of(), 2);
-        Task B = new Task("B", List.of("A"), 2);
-        Task C = new Task("C", List.of("A"), 2);
+
+        Task B = new Task("B", List.of("A"), 2) {
+            @Override
+            public void execute() throws Exception {
+                Thread.sleep(500);
+                System.out.println("[WORK] B done");
+            }
+        };
+
+        Task C = new Task("C", List.of("A"), 2) {
+            @Override
+            public void execute() throws Exception {
+                Thread.sleep(500);
+                System.out.println("[WORK] C done");
+            }
+        };
+
         Task D = new Task("D", List.of("B", "C"), 2);
 
         List<Task> tasks = List.of(A, B, C, D);
 
-        PipelineExecutor executor = new PipelineExecutor(tasks);
+        PipelineExecutor executor =
+                new PipelineExecutor(tasks, 4, "pipeline-normal");
+
         executor.execute();
     }
 
-    // 🔁 Test 2: Retry scenario
+    // 🔁 TEST 2: Retry scenario
     private static void testRetryPipeline() {
 
         Task A = new Task("A", List.of(), 2);
@@ -44,15 +65,14 @@ public class Main {
         Task B = new Task("B", List.of("A"), 2) {
             @Override
             public void execute() throws Exception {
-                System.out.println("[START] " + id + " attempt " + attempts);
+                System.out.println("[WORK] B attempt " + attempts);
 
-                // Fail first attempt, succeed second
                 if (attempts < 2) {
                     throw new Exception("Simulated failure");
                 }
 
                 Thread.sleep(200);
-                System.out.println("[END] " + id);
+                System.out.println("[WORK] B success");
             }
         };
 
@@ -60,11 +80,13 @@ public class Main {
 
         List<Task> tasks = List.of(A, B, C);
 
-        PipelineExecutor executor = new PipelineExecutor(tasks);
+        PipelineExecutor executor =
+                new PipelineExecutor(tasks, 3, "pipeline-retry");
+
         executor.execute();
     }
 
-    // ❌ Test 3: Permanent failure
+    // ❌ TEST 3: Failure + downstream SKIPPED
     private static void testFailurePipeline() {
 
         Task A = new Task("A", List.of(), 2);
@@ -72,20 +94,24 @@ public class Main {
         Task B = new Task("B", List.of("A"), 1) {
             @Override
             public void execute() throws Exception {
-                System.out.println("[START] " + id);
-                throw new Exception("Always failing");
+                System.out.println("[WORK] B always fails");
+                throw new Exception("Permanent failure");
             }
         };
 
         Task C = new Task("C", List.of("B"), 2);
 
-        List<Task> tasks = List.of(A, B, C);
+        Task D = new Task("D", List.of("C"), 2);
 
-        PipelineExecutor executor = new PipelineExecutor(tasks);
+        List<Task> tasks = List.of(A, B, C, D);
+
+        PipelineExecutor executor =
+                new PipelineExecutor(tasks, 3, "pipeline-failure");
+
         executor.execute();
     }
 
-    // 🔄 Test 4: Cycle detection
+    // 🔄 TEST 4: Cycle detection edge case
     private static void testCyclePipeline() {
 
         Task A = new Task("A", List.of("C"), 2);
@@ -94,7 +120,9 @@ public class Main {
 
         List<Task> tasks = List.of(A, B, C);
 
-        PipelineExecutor executor = new PipelineExecutor(tasks);
+        PipelineExecutor executor =
+                new PipelineExecutor(tasks, 2, "pipeline-cycle");
+
         executor.execute();
     }
 }
