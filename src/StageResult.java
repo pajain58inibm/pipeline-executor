@@ -1,10 +1,12 @@
 public class StageResult {
+    String key;
     String stageId;
     String pipelineId;
-    String status; // SUCCESS, FAILED, SKIPPED
+    String status;
     long durationMs;
 
-    public StageResult(String stageId, String pipelineId, String status, long durationMs) {
+    public StageResult(String key, String stageId, String pipelineId, String status, long durationMs) {
+        this.key = key;
         this.stageId = stageId;
         this.pipelineId = pipelineId;
         this.status = status;
