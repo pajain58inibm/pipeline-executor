@@ -306,14 +306,27 @@ To scale:
 4. State → persistent DB
 
 ---
+📦 Files
+Task.java              → defines a task
+PipelineExecutor.java → runs the pipeline
+StageResult.java      → stores result
+FailurePolicy.java    → failure mode
+Main.java             → entry point
+▶️ Run
+javac src/*.java
+java -cp src Main
+🧠 Key Idea
 
-# 💬 Interview Talking Points
+Tasks are nodes in a graph.
+We run tasks when all dependencies are complete.
 
-You can confidently say:
-
-> “This system supports DAG-based parallel execution with bounded concurrency, idempotent retries, failure propagation, timeout handling, and structured observability, similar to workflow engines like Airflow or CI/CD systems.”
-
----
+📊 Flow Diagram
+        A
+       / \
+      B   C
+       \ /
+        D
+---        
 
 # 📌 Summary
 
